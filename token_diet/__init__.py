@@ -1,6 +1,5 @@
-def main():
-    print("Hello from token-diet!")
+"""Public entry points for Token Diet."""
 
+from .cli import main
 
-if __name__ == "__main__":
-    main()
+__all__ = ["main"]

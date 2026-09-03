@@ -8,3 +8,9 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Tooling output
+.uv-cache/
+.ruff_cache/
+.coverage
+htmlcov/
