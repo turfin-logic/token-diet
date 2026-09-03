@@ -1,55 +1,82 @@
+"""Safe, conservative source transformations used by the CLI."""
+
+from __future__ import annotations
+
 import ast
-import re
+
+
+class _DocstringRemover(ast.NodeTransformer):
+    """Remove Python docstrings while preserving executable statements."""
+
+    @staticmethod
+    def _without_docstring(node: ast.AST) -> ast.AST:
+        body = getattr(node, "body", None)
+        if not isinstance(body, list) or not body:
+            return node
+
+        first_statement = body[0]
+        is_docstring = (
+            isinstance(first_statement, ast.Expr)
+            and isinstance(first_statement.value, ast.Constant)
+            and isinstance(first_statement.value.value, str)
+        )
+        if is_docstring:
+            node.body = body[1:] or [ast.Pass()]  # type: ignore[attr-defined]
+        return node
+
+    def visit_Module(self, node: ast.Module) -> ast.AST:
+        self.generic_visit(node)
+        return self._without_docstring(node)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.AST:
+        self.generic_visit(node)
+        return self._without_docstring(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> ast.AST:
+        self.generic_visit(node)
+        return self._without_docstring(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> ast.AST:
+        self.generic_visit(node)
+        return self._without_docstring(node)
+
 
 def strip_docstrings_and_comments(source_code: str) -> str:
-    """Removes docstrings and comments from Python code using AST and regex."""
-    try:
-        # For Python files, use AST to reliably remove docstrings
-        tree = ast.parse(source_code)
-        
-        # A simple NodeTransformer to remove docstrings
-        class DocstringRemover(ast.NodeTransformer):
-            def visit_FunctionDef(self, node):
-                self.generic_visit(node)
-                if ast.get_docstring(node):
-                    node.body = node.body[1:] if len(node.body) > 1 else [ast.Pass()]
-                return node
-                
-            def visit_ClassDef(self, node):
-                self.generic_visit(node)
-                if ast.get_docstring(node):
-                    node.body = node.body[1:] if len(node.body) > 1 else [ast.Pass()]
-                return node
-                
-            def visit_Module(self, node):
-                self.generic_visit(node)
-                if ast.get_docstring(node):
-                    node.body = node.body[1:] if len(node.body) > 1 else [ast.Pass()]
-                return node
+    """Return valid Python source without comments or docstrings.
 
-        tree = DocstringRemover().visit(tree)
-        # Using ast.unparse requires Python 3.9+
-        clean_code = ast.unparse(tree)
-        
-        # Fallback regex for remaining # comments
-        clean_code = re.sub(r'(?m)^\s*#.*$', '', clean_code)
-        # Remove empty lines
-        clean_code = re.sub(r'\n\s*\n', '\n', clean_code)
-        return clean_code
-        
+    ``ast.unparse`` intentionally formats the parsed program. It is used only
+    for Python files; non-Python text is left unchanged by the caller so that
+    comment-looking text inside strings or templates is never altered.
+    """
+
+    tree = ast.parse(source_code)
+    cleaned_tree = _DocstringRemover().visit(tree)
+    ast.fix_missing_locations(cleaned_tree)
+    return ast.unparse(cleaned_tree)
+
+
+def optimize_source(source_code: str, suffix: str) -> str:
+    """Optimize Python conservatively and preserve every other file verbatim."""
+
+    if suffix.lower() not in {".py", ".pyi", ".pyw"}:
+        return source_code
+
+    try:
+        return strip_docstrings_and_comments(source_code)
     except SyntaxError:
-        # If it's not valid Python (or JS/TS etc), just do basic regex compression
-        clean_code = re.sub(r'(?m)^\s*//.*$', '', source_code)  # JS comments
-        clean_code = re.sub(r'/\*[\s\S]*?\*/', '', clean_code) # Block comments
-        clean_code = re.sub(r'(?m)^\s*#.*$', '', clean_code)   # Python/Bash comments
-        clean_code = re.sub(r'\n\s*\n', '\n', clean_code)
-        return clean_code
+        # A broken Python source file can still be useful context. Keeping it
+        # intact is safer than applying regular expressions to arbitrary text.
+        return source_code
+
 
 def count_tokens(text: str, model: str = "cl100k_base") -> int:
-    """Counts tokens using tiktoken (used by OpenAI models)."""
+    """Count tokens with tiktoken, falling back to a documented approximation."""
+
     try:
         import tiktoken
+
         encoding = tiktoken.get_encoding(model)
         return len(encoding.encode(text))
-    except ImportError:
-        return len(text) // 4  # Rough fallback
+    except (ImportError, ValueError):
+        # The approximation avoids making a missing optional encoder fatal.
+        return max(1, len(text) // 4) if text else 0
